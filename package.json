@@ -1,0 +1,51 @@
+{
+  "name": "@novacraft-engineering/pulsar-code-push",
+  "version": "1.5.0",
+  "description": "Pulsar OTA client for React Native — over-the-air JavaScript updates. A CodePush-compatible client (RevoPush lineage) pointed at Pulsar.",
+  "main": "CodePush.js",
+  "typings": "typings/react-native-code-push.d.ts",
+  "homepage": "https://pulsar.novacraft.africa",
+  "keywords": ["react-native", "code-push", "codepush", "pulsar", "ota", "over-the-air", "hot-update"],
+  "author": "Novacraft Engineering",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Novacraft-Africa/pulsar-code-push.git"
+  },
+  "publishConfig": {"access": "public"},
+  "files": [
+    "CodePush.js",
+    "AlertAdapter.js",
+    "logging.js",
+    "package-mixins.js",
+    "request-fetch-adapter.js",
+    "react-native.config.js",
+    "CodePush.podspec",
+    "android",
+    "ios",
+    "typings",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "code-push": "4.2.3",
+    "glob": "^7.1.7",
+    "hoist-non-react-statics": "^3.3.2",
+    "inquirer": "^8.1.5",
+    "plist": "^3.0.4",
+    "semver": "^7.3.5",
+    "xcode": "3.0.1"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-native": ">=0.70.0"
+  },
+  "rnpm": {
+    "android": {
+      "packageInstance": "new CodePush(getResources().getString(R.string.CodePushDeploymentKey), getApplicationContext(), BuildConfig.DEBUG)"
+    },
+    "ios": {
+      "sharedLibraries": ["libz"]
+    }
+  }
+}
