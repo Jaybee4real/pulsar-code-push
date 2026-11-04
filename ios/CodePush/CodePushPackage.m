@@ -4,6 +4,7 @@
 #else
 #import "SSZipArchive.h"
 #endif
+#import "PulsarBundleDecryptor.h"
 
 @implementation CodePushPackage
 
@@ -88,6 +89,33 @@ static NSString *const UnzippedFolderName = @"unzipped";
                                                     NSError *error = nil;
                                                     NSString * unzippedFolderPath = [CodePushPackage getUnzippedFolderPath];
                                                     NSMutableDictionary * mutableUpdatePackage = [updatePackage mutableCopy];
+                                                    if ([PulsarBundleDecryptor isSealedFileAtPath:downloadFilePath]) {
+                                                        NSString *decryptedFilePath = [downloadFilePath stringByAppendingString:@".decrypted"];
+                                                        NSError *decryptError = nil;
+                                                        BOOL isDecrypted = [PulsarBundleDecryptor decryptFileAtPath:downloadFilePath
+                                                                                                             toPath:decryptedFilePath
+                                                                                                         bundleKeys:[[CodePushConfig current] bundleKeys]
+                                                                                                expectedPackageHash:newUpdateHash
+                                                                                                       allowedKinds:@[@"full", @"diff"]
+                                                                                                              error:&decryptError];
+                                                        [[NSFileManager defaultManager] removeItemAtPath:downloadFilePath error:nil];
+                                                        if (!isDecrypted) {
+                                                            NSString *failureCause = decryptError.localizedDescription ?: @"unknown";
+                                                            NSString *errorMessage = [NSString stringWithFormat:@"decrypt_failed:%@", failureCause];
+                                                            failCallback([failureCause isEqualToString:@"io"]
+                                                                         ? [NSError errorWithDomain:PulsarBundleDecryptor.errorDomain code:1 userInfo:@{ NSLocalizedDescriptionKey: errorMessage }]
+                                                                         : [CodePushErrorUtils errorWithMessage:errorMessage]);
+                                                            return;
+                                                        }
+                                                        if (![[NSFileManager defaultManager] moveItemAtPath:decryptedFilePath
+                                                                                                     toPath:downloadFilePath
+                                                                                                      error:&error]) {
+                                                            [[NSFileManager defaultManager] removeItemAtPath:decryptedFilePath error:nil];
+                                                            failCallback(error);
+                                                            return;
+                                                        }
+                                                        isZip = [CodePushPackage fileHasZipHeader:downloadFilePath];
+                                                    }
                                                     if (isZip) {
                                                         if ([[NSFileManager defaultManager] fileExistsAtPath:unzippedFolderPath]) {
                                                             // This removes any unzipped download data that could have been left
@@ -309,6 +337,11 @@ static NSString *const UnzippedFolderName = @"unzipped";
                                                             }
                                                         }
                                                     } else {
+                                                        if ([PulsarBundleDecryptor isSealedFileAtPath:downloadFilePath]) {
+                                                            [[NSFileManager defaultManager] removeItemAtPath:downloadFilePath error:nil];
+                                                            failCallback([CodePushErrorUtils errorWithMessage:@"decrypt_failed:sealed-bundle"]);
+                                                            return;
+                                                        }
                                                         [[NSFileManager defaultManager] createDirectoryAtPath:newUpdateFolderPath
                                                                                   withIntermediateDirectories:YES
                                                                                                    attributes:nil
@@ -342,6 +375,15 @@ static NSString *const UnzippedFolderName = @"unzipped";
                                                 failCallback:failCallback];
     
     [downloadHandler download:updatePackage[@"downloadUrl"]];
+}
+
++ (BOOL)fileHasZipHeader:(NSString *)filePath
+{
+    NSFileHandle *fileHandle = [NSFileHandle fileHandleForReadingAtPath:filePath];
+    NSData *leadingBytes = [fileHandle readDataOfLength:4];
+    [fileHandle closeFile];
+    const unsigned char zipHeader[4] = {'P', 'K', 3, 4};
+    return leadingBytes.length == 4 && memcmp(leadingBytes.bytes, zipHeader, 4) == 0;
 }
 
 + (NSString *)getCodePushPath

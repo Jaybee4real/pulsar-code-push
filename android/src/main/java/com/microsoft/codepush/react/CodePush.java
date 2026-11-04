@@ -18,7 +18,9 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public class CodePush implements ReactPackage {
     private static final Object LOCK = new Object();
@@ -50,12 +52,14 @@ public class CodePush implements ReactPackage {
 
     // Config properties.
     private String mDeploymentKey;
-    private static String mServerUrl = "https://api.revopush.org/";
+    private static String mServerUrl = "https://api.usepulsar.dev/";
 
     private Context mContext;
     private final boolean mIsDebugMode;
 
     private static String mPublicKey;
+
+    private static Map<String, byte[]> mBundleKeys = new LinkedHashMap<>();
 
     private static ReactInstanceHolder mReactInstanceHolder;
 
@@ -92,7 +96,10 @@ public class CodePush implements ReactPackage {
         String publicKeyFromStrings = getCustomPropertyFromStringsIfExist("PublicKey");
         if (publicKeyFromStrings != null) mPublicKey = publicKeyFromStrings;
 
+        mBundleKeys = PulsarBundleDecryptor.parseBundleKeys(getCustomPropertyFromStringsIfExist("BundleKeys"));
+
         String serverUrlFromStrings = getCustomPropertyFromStringsIfExist("ServerUrl");
+        if (serverUrlFromStrings == null) serverUrlFromStrings = getCustomPropertyFromStringsIfExist("ServerURL");
         if (serverUrlFromStrings != null) mServerUrl = serverUrlFromStrings;
 
         // ignore liveReload when CodePush is initializing so that unneccessary cache could be cleared
@@ -184,6 +191,10 @@ public class CodePush implements ReactPackage {
 
     public String getPublicKey() {
         return mPublicKey;
+    }
+
+    public Map<String, byte[]> getBundleKeys() {
+        return mBundleKeys;
     }
 
     long getBinaryResourcesModifiedTime() {

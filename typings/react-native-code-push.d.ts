@@ -8,6 +8,11 @@ export interface CodePushOptions extends SyncOptions {
      * Defaults to codePush.CheckFrequency.ON_APP_START.
      */
     checkFrequency: CodePush.CheckFrequency;
+
+    /**
+     * Development builds skip update checks unless this is true. Defaults to false.
+     */
+    allowUpdatesInDev?: boolean;
 }
 
 export interface DownloadProgress {
@@ -98,6 +103,11 @@ export interface RemotePackage extends Package {
      * The URL at which the package is available for download.
      */
     downloadUrl: string;
+
+    /**
+     * Whether the update is a private (encrypted) bundle that the device decrypts before installing.
+     */
+    isEncrypted?: boolean;
 }
 
 export interface SyncOptions {
@@ -261,6 +271,12 @@ declare namespace CodePush {
      * @param handleBinaryVersionMismatchCallback An optional callback for handling target binary version mismatch
      */
     function checkForUpdate(deploymentKey?: string, handleBinaryVersionMismatchCallback?: HandleBinaryVersionMismatchCallback): Promise<RemotePackage | null>;
+
+    /**
+     * Development builds (`__DEV__`) skip update checks, so an app running from Metro never downloads an OTA.
+     * Pass true to test OTA updates in a development build.
+     */
+    function allowUpdatesInDev(allowed?: boolean): void;
 
     /**
      * Retrieves the metadata for an installed update (e.g. description, mandatory).

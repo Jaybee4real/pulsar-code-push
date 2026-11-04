@@ -22,6 +22,7 @@ import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableMap;
+import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.common.annotations.UnstableReactNativeAPI;
 import com.facebook.react.devsupport.interfaces.DevSupportManager;
@@ -47,6 +48,9 @@ import java.util.UUID;
 
 @OptIn(markerClass = UnstableReactNativeAPI.class)
 public class CodePushNativeModule extends BaseJavaModule {
+    private static final String LAST_FAILURE_REASON_KEY = "CODE_PUSH_LAST_FAILURE_REASON";
+    private static final String LAST_FAILURE_STACK_KEY = "CODE_PUSH_LAST_FAILURE_STACK";
+    private static final String LAST_FAILURE_AT_KEY = "CODE_PUSH_LAST_FAILURE_AT";
     private String mBinaryContentsHash = null;
     private String mClientUniqueId = null;
     private LifecycleEventListener mLifecycleEventListener = null;
@@ -402,6 +406,37 @@ public class CodePushNativeModule extends BaseJavaModule {
         return;
     }
 
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public boolean recordFailure(String reason, String stack) {
+        SharedPreferences preferences = mCodePush.getContext().getSharedPreferences(CodePushConstants.CODE_PUSH_PREFERENCES, 0);
+        preferences.edit()
+                .putString(LAST_FAILURE_REASON_KEY, reason == null ? "" : reason)
+                .putString(LAST_FAILURE_STACK_KEY, stack == null ? "" : stack)
+                .putLong(LAST_FAILURE_AT_KEY, System.currentTimeMillis())
+                .commit();
+        return true;
+    }
+
+    @ReactMethod
+    public void getLastFailure(Promise promise) {
+        SharedPreferences preferences = mCodePush.getContext().getSharedPreferences(CodePushConstants.CODE_PUSH_PREFERENCES, 0);
+        if (!preferences.contains(LAST_FAILURE_REASON_KEY)) {
+            promise.resolve(null);
+            return;
+        }
+        WritableMap failure = Arguments.createMap();
+        failure.putString("reason", preferences.getString(LAST_FAILURE_REASON_KEY, ""));
+        failure.putString("stack", preferences.getString(LAST_FAILURE_STACK_KEY, ""));
+        failure.putDouble("at", preferences.getLong(LAST_FAILURE_AT_KEY, 0));
+        promise.resolve(failure);
+    }
+
+    @ReactMethod
+    public void clearLastFailure() {
+        SharedPreferences preferences = mCodePush.getContext().getSharedPreferences(CodePushConstants.CODE_PUSH_PREFERENCES, 0);
+        preferences.edit().remove(LAST_FAILURE_REASON_KEY).remove(LAST_FAILURE_STACK_KEY).remove(LAST_FAILURE_AT_KEY).apply();
+    }
+
     @ReactMethod
     public void disallow(Promise promise) {
         CodePushUtils.log("Disallowing restarts");
@@ -473,7 +508,7 @@ public class CodePushNativeModule extends BaseJavaModule {
                                     .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
                                     .emit(CodePushConstants.DOWNLOAD_PROGRESS_EVENT_NAME, latestDownloadProgress.createWritableMap());
                         }
-                    }, mCodePush.getPublicKey());
+                    }, mCodePush.getPublicKey(), mCodePush.getBundleKeys());
 
                     JSONObject newPackage = mUpdateManager.getPackage(CodePushUtils.tryGetString(updatePackage, CodePushConstants.PACKAGE_HASH_KEY));
                     promise.resolve(CodePushUtils.convertJsonObjectToWritable(newPackage));
@@ -501,6 +536,13 @@ public class CodePushNativeModule extends BaseJavaModule {
             configMap.putString("clientUniqueId", mClientUniqueId);
             configMap.putString("deploymentKey", mCodePush.getDeploymentKey());
             configMap.putString("serverUrl", mCodePush.getServerUrl());
+            configMap.putString("deviceModel", android.os.Build.MODEL);
+
+            WritableArray bundleKeyIds = Arguments.createArray();
+            for (String bundleKeyId : mCodePush.getBundleKeys().keySet()) {
+                bundleKeyIds.pushString(bundleKeyId);
+            }
+            configMap.putArray("bundleKeyIds", bundleKeyIds);
 
             // The binary hash may be null in debug builds
             if (mBinaryContentsHash != null) {

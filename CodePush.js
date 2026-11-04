@@ -1,14 +1,45 @@
-import { AcquisitionManager as Sdk } from "code-push/script/acquisition-sdk";
+import { AcquisitionManager as Sdk } from "./acquisition-sdk";
 import { Alert } from "./AlertAdapter";
 import requestFetchAdapter from "./request-fetch-adapter";
 import { AppState, Platform } from "react-native";
 import log from "./logging";
 import hoistStatics from 'hoist-non-react-statics';
+import { setTargetingInfo, getTargetingInfo, setReportExtras, setBundleKeyIds } from "./targeting";
+import { allowUpdatesInDev, devUpdatesBlocked } from "./dev-guard";
 
 let NativeCodePush = require("react-native").NativeModules.CodePush;
+let appReadyNotified = false;
+
+function recordFatalErrorsBeforeReady() {
+  const errorUtils = global.ErrorUtils;
+  if (!errorUtils || !errorUtils.getGlobalHandler || global.__pulsarFailureRecorder) return;
+  global.__pulsarFailureRecorder = true;
+  const previousHandler = errorUtils.getGlobalHandler();
+  errorUtils.setGlobalHandler((error, isFatal) => {
+    if (isFatal && !appReadyNotified && NativeCodePush && NativeCodePush.recordFailure) {
+      try {
+        NativeCodePush.recordFailure(String((error && error.message) || error).slice(0, 500), String((error && error.stack) || "").slice(0, 4000));
+      } catch (recordError) {
+        log(`Could not record the failure: ${recordError}`);
+      }
+    }
+    if (previousHandler) previousHandler(error, isFatal);
+  });
+}
+recordFatalErrorsBeforeReady();
 const PackageMixins = require("./package-mixins")(NativeCodePush);
 
-async function checkForUpdate(deploymentKey = null, handleBinaryVersionMismatchCallback = null) {
+// Apps that choose their deployment key in JS (per environment) leave the native one empty, so the
+// launch-time status report has no key. Fall back to the first key the app checks with (its primary
+// backend) and send a report that was held for want of one as soon as that key is known.
+let fallbackDeployment = null;
+let reportAwaitingKey = null;
+
+async function checkForUpdate(deploymentKey = null, handleBinaryVersionMismatchCallback = null, serverUrl = null) {
+  if (devUpdatesBlocked()) {
+    log("Skipping the update check in a development build. Call codePush.allowUpdatesInDev(true) to test OTA updates while Metro is running.");
+    return null;
+  }
   /*
    * Before we ask the server if an update exists, we
    * need to retrieve three pieces of information from the
@@ -19,6 +50,12 @@ async function checkForUpdate(deploymentKey = null, handleBinaryVersionMismatchC
    * different from the CodePush update they have already installed.
    */
   const nativeConfig = await getConfiguration();
+  setBundleKeyIds(nativeConfig && nativeConfig.bundleKeyIds);
+  // The native module reports the hardware model; use it for Pulsar device-model targeting unless
+  // the host app already supplied one explicitly (e.g. via react-native-device-info).
+  if (nativeConfig && nativeConfig.deviceModel && !getTargetingInfo().deviceModel) {
+    setTargetingInfo({ deviceModel: nativeConfig.deviceModel });
+  }
   /*
    * If a deployment key was explicitly provided,
    * then let's override the one we retrieved
@@ -26,7 +63,21 @@ async function checkForUpdate(deploymentKey = null, handleBinaryVersionMismatchC
    * dynamically "redirecting" end-users at different
    * deployments (e.g. an early access deployment for insiders).
    */
-  const config = deploymentKey ? { ...nativeConfig, ...{ deploymentKey } } : nativeConfig;
+  // Allow the deployment key AND server URL to be overridden per-call, so one client can
+  // check multiple backends (e.g. RevoPush and Pulsar) in a single update cycle.
+  const config = {
+    ...nativeConfig,
+    ...(deploymentKey ? { deploymentKey } : {}),
+    ...(serverUrl ? { serverUrl } : {}),
+  };
+  if (config.deploymentKey && !fallbackDeployment) {
+    fallbackDeployment = { deploymentKey: config.deploymentKey, serverUrl: config.serverUrl };
+    if (reportAwaitingKey) {
+      const heldReport = reportAwaitingKey;
+      reportAwaitingKey = null;
+      tryReportStatus(heldReport);
+    }
+  }
   const sdk = getPromisifiedSdk(requestFetchAdapter, config);
 
   // Use dynamically overridden getCurrentPackage() during tests.
@@ -174,14 +225,26 @@ const notifyApplicationReady = (() => {
 
 async function notifyApplicationReadyInternal() {
   await NativeCodePush.notifyApplicationReady();
+  appReadyNotified = true;
   const statusReport = await NativeCodePush.getNewStatusReport();
+  if ((!statusReport || statusReport.status !== "DeploymentFailed") && NativeCodePush.clearLastFailure) NativeCodePush.clearLastFailure();
   statusReport && tryReportStatus(statusReport); // Don't wait for this to complete.
 
   return statusReport;
 }
 
+// Report an install to the Pulsar server that delivered it. Its download links are
+// `<server>/download/...`, so the package names its own server — which matters when the native
+// config points elsewhere (an Android strings.xml that spells the key `CodePushServerURL`, the iOS
+// spelling, is ignored and falls back to the SDK's default).
+function pulsarServerFor(localPackage) {
+  const match = /^(https?:\/\/[^/?#]+)\/download\//.exec(localPackage?.downloadUrl || '');
+  return match ? match[1] : null;
+}
+
 async function tryReportStatus(statusReport, retryOnAppResume) {
-  const config = await getConfiguration();
+  const nativeConfig = await getConfiguration();
+  const config = nativeConfig.deploymentKey || !fallbackDeployment ? nativeConfig : { ...nativeConfig, ...fallbackDeployment };
   const previousLabelOrAppVersion = statusReport.previousLabelOrAppVersion;
   const previousDeploymentKey = statusReport.previousDeploymentKey || config.deploymentKey;
   try {
@@ -189,6 +252,7 @@ async function tryReportStatus(statusReport, retryOnAppResume) {
       log(`Reporting binary update (${statusReport.appVersion})`);
 
       if (!config.deploymentKey) {
+        reportAwaitingKey = statusReport;
         throw new Error("Deployment key is missed");
       }
 
@@ -203,9 +267,19 @@ async function tryReportStatus(statusReport, retryOnAppResume) {
         await NativeCodePush.setLatestRollbackInfo(statusReport.package.packageHash);
       }
 
-      config.deploymentKey = statusReport.package.deploymentKey;
-      const sdk = getPromisifiedSdk(requestFetchAdapter, config);
-      await sdk.reportStatusDeploy(statusReport.package, statusReport.status, previousLabelOrAppVersion, previousDeploymentKey);
+      const deliveredBy = pulsarServerFor(statusReport.package);
+      const reportConfig = {...config, deploymentKey: statusReport.package.deploymentKey, ...(deliveredBy ? {serverUrl: deliveredBy} : {})};
+      const sdk = getPromisifiedSdk(requestFetchAdapter, reportConfig);
+      const failure = statusReport.status === "DeploymentFailed" && NativeCodePush.getLastFailure
+        ? await NativeCodePush.getLastFailure().catch(() => null)
+        : null;
+      setReportExtras(failure ? { failureReason: failure.reason, failureStack: failure.stack } : null);
+      try {
+        await sdk.reportStatusDeploy(statusReport.package, statusReport.status, previousLabelOrAppVersion, previousDeploymentKey);
+      } finally {
+        setReportExtras(null);
+      }
+      if (failure && NativeCodePush.clearLastFailure) NativeCodePush.clearLastFailure();
     }
 
     NativeCodePush.recordStatusReported(statusReport);
@@ -364,6 +438,7 @@ async function syncInternal(options = {}, syncStatusChangeCallback, downloadProg
   let resolvedInstallMode;
   const syncOptions = {
     deploymentKey: null,
+    serverUrl: null,
     ignoreFailedUpdates: true,
     rollbackRetryOptions: null,
     installMode: CodePush.InstallMode.ON_NEXT_RESTART,
@@ -416,7 +491,7 @@ async function syncInternal(options = {}, syncStatusChangeCallback, downloadProg
     await CodePush.notifyApplicationReady();
 
     syncStatusChangeCallback(CodePush.SyncStatus.CHECKING_FOR_UPDATE);
-    const remotePackage = await checkForUpdate(syncOptions.deploymentKey, handleBinaryVersionMismatchCallback);
+    const remotePackage = await checkForUpdate(syncOptions.deploymentKey, handleBinaryVersionMismatchCallback, syncOptions.serverUrl);
 
     const doDownloadAndInstall = async () => {
       syncStatusChangeCallback(CodePush.SyncStatus.DOWNLOADING_PACKAGE);
@@ -512,6 +587,7 @@ async function syncInternal(options = {}, syncStatusChangeCallback, downloadProg
 let CodePush;
 
 function codePushify(options = {}) {
+  if (typeof options.allowUpdatesInDev === "boolean") allowUpdatesInDev(options.allowUpdatesInDev);
   let React;
   let ReactNative = require("react-native");
 
@@ -603,6 +679,7 @@ if (NativeCodePush) {
   CodePush = codePushify;
   Object.assign(CodePush, {
     AcquisitionSdk: Sdk,
+    allowUpdatesInDev,
     checkForUpdate,
     getConfiguration,
     getCurrentPackage,
@@ -611,6 +688,7 @@ if (NativeCodePush) {
     notifyAppReady: notifyApplicationReady,
     notifyApplicationReady,
     restartApp,
+    setTargetingInfo,
     setUpTestDependencies,
     sync,
     disallowRestart: NativeCodePush.disallow,

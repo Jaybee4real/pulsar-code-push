@@ -16,6 +16,14 @@
 #endif
 
 #import "CodePush.h"
+#import <sys/utsname.h>
+
+// Hardware model identifier (e.g. "iPhone15,3"), used for Pulsar device-model targeting.
+static NSString *CPDeviceModel(void) {
+    struct utsname systemInfo;
+    uname(&systemInfo);
+    return [NSString stringWithCString:systemInfo.machine encoding:NSUTF8StringEncoding];
+}
 
 @interface CodePush () <RCTBridgeModule, RCTFrameUpdateObserver>
 @end
@@ -32,6 +40,7 @@
     long long _latestExpectedContentLength;
     long long _latestReceivedConentLength;
     BOOL _didUpdateProgress;
+    NSTimeInterval _lastProgressDispatch;
     
     BOOL _allowed;
     BOOL _restartInProgress;
@@ -44,6 +53,7 @@ RCT_EXPORT_MODULE()
 
 // These constants represent emitted events
 static NSString *const DownloadProgressEvent = @"CodePushDownloadProgress";
+static NSString *const LastFailureKey = @"CODE_PUSH_LAST_FAILURE";
 
 // These constants represent valid deployment statuses
 static NSString *const DeploymentFailed = @"DeploymentFailed";
@@ -745,10 +755,27 @@ RCT_EXPORT_METHOD(downloadUpdate:(NSDictionary*)updatePackage
                 _didUpdateProgress = NO;
                 self.paused = YES;
                 [self dispatchDownloadProgressEvent];
+                return;
+            }
+
+            // Bridgeless React Native only drives RCTFrameUpdateObserver for its timing module, so
+            // didUpdateFrame never fires on the New Architecture. Emit throttled progress from here.
+            NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+            if (notifyProgress && now - _lastProgressDispatch >= 0.1) {
+                _lastProgressDispatch = now;
+                _didUpdateProgress = NO;
+                [self dispatchDownloadProgressEvent];
             }
         }
         // The download completed
         doneCallback:^{
+            if (notifyProgress && _latestExpectedContentLength != _latestReceivedConentLength) {
+                _latestExpectedContentLength = _latestReceivedConentLength;
+                [self dispatchDownloadProgressEvent];
+            }
+            _didUpdateProgress = NO;
+            self.paused = YES;
+
             NSError *err;
             NSDictionary *newPackage = [CodePushPackage getPackage:mutableUpdatePackage[PackageHashKey] error:&err];
 
@@ -797,6 +824,31 @@ RCT_EXPORT_METHOD(downloadUpdate:(NSDictionary*)updatePackage
     }
 }
 
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(recordFailure:(NSString *)reason
+                                                stack:(NSString *)stack)
+{
+    NSDictionary *failure = @{
+        @"reason": reason ?: @"",
+        @"stack": stack ?: @"",
+        @"at": @((long long)([[NSDate date] timeIntervalSince1970] * 1000))
+    };
+    NSUserDefaults *preferences = [NSUserDefaults standardUserDefaults];
+    [preferences setObject:failure forKey:LastFailureKey];
+    [preferences synchronize];
+    return nil;
+}
+
+RCT_EXPORT_METHOD(getLastFailure:(RCTPromiseResolveBlock)resolve
+                        rejecter:(RCTPromiseRejectBlock)reject)
+{
+    resolve([[NSUserDefaults standardUserDefaults] objectForKey:LastFailureKey] ?: [NSNull null]);
+}
+
+RCT_EXPORT_METHOD(clearLastFailure)
+{
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:LastFailureKey];
+}
+
 /*
  * This is the native side of the CodePush.getConfiguration method. It isn't
  * currently exposed via the "react-native-code-push" module, and is used
@@ -806,7 +858,8 @@ RCT_EXPORT_METHOD(downloadUpdate:(NSDictionary*)updatePackage
 RCT_EXPORT_METHOD(getConfiguration:(RCTPromiseResolveBlock)resolve
                           rejecter:(RCTPromiseRejectBlock)reject)
 {
-    NSDictionary *configuration = [[CodePushConfig current] configuration];
+    NSMutableDictionary *configuration = [[[CodePushConfig current] configuration] mutableCopy];
+    configuration[@"deviceModel"] = CPDeviceModel();
     NSError *error;
     if (isRunningBinaryVersion) {
         // isRunningBinaryVersion will not get set to "YES" if running against the packager.

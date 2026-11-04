@@ -13,6 +13,8 @@ import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.Map;
 
 import javax.net.ssl.HttpsURLConnection;
 
@@ -145,7 +147,7 @@ public class CodePushUpdateManager {
 
     public void downloadPackage(JSONObject updatePackage, String expectedBundleFileName,
                                 DownloadProgressCallback progressCallback,
-                                String stringPublicKey) throws IOException {
+                                String stringPublicKey, Map<String, byte[]> bundleKeys) throws IOException {
         String newUpdateHash = updatePackage.optString(CodePushConstants.PACKAGE_HASH_KEY, null);
         String newUpdateFolderPath = getPackageFolderPath(newUpdateHash);
         String newUpdateMetadataPath = CodePushUtils.appendPathComponent(newUpdateFolderPath, CodePushConstants.PACKAGE_FILE_NAME);
@@ -162,6 +164,7 @@ public class CodePushUpdateManager {
         BufferedOutputStream bout = null;
         File downloadFile = null;
         boolean isZip = false;
+        boolean isSealed = false;
 
         // Download the file while checking if it is a zip and notifying client of progress.
         try {
@@ -214,6 +217,7 @@ public class CodePushUpdateManager {
             }
 
             isZip = ByteBuffer.wrap(header).getInt() == 0x504b0304;
+            isSealed = ByteBuffer.wrap(header).getInt() == PulsarBundleDecryptor.SEALED_MAGIC;
         } catch (MalformedURLException e) {
             throw new CodePushMalformedDataException(downloadUrlString, e);
         } finally {
@@ -225,6 +229,25 @@ public class CodePushUpdateManager {
             } catch (IOException e) {
                 throw new CodePushUnknownException("Error closing IO resources.", e);
             }
+        }
+
+        if (isSealed) {
+            File decryptedFile = new File(downloadFile.getParentFile(), CodePushConstants.DOWNLOAD_FILE_NAME + ".decrypted");
+            try {
+                PulsarBundleDecryptor.decryptFile(downloadFile, decryptedFile, bundleKeys, newUpdateHash, Arrays.asList("full", "diff"));
+            } catch (PulsarBundleDecryptor.DecryptionException e) {
+                FileUtils.deleteFileOrFolderSilently(downloadFile);
+                if ("io".equals(e.getMessage())) {
+                    throw new IOException("decrypt_failed:" + e.getMessage());
+                }
+                throw new CodePushInvalidUpdateException("decrypt_failed:" + e.getMessage());
+            }
+            FileUtils.deleteFileOrFolderSilently(downloadFile);
+            if (!decryptedFile.renameTo(downloadFile)) {
+                FileUtils.deleteFileOrFolderSilently(decryptedFile);
+                throw new IOException("decrypt_failed:io");
+            }
+            isZip = PulsarBundleDecryptor.readLeadingInt(downloadFile) == 0x504b0304;
         }
 
         if (isZip) {
@@ -300,6 +323,10 @@ public class CodePushUpdateManager {
             }
         } else {
             // File is a jsbundle, move it to a folder with the packageHash as its name
+            if (PulsarBundleDecryptor.isSealedFile(downloadFile)) {
+                FileUtils.deleteFileOrFolderSilently(downloadFile);
+                throw new CodePushInvalidUpdateException("decrypt_failed:sealed-bundle");
+            }
             FileUtils.moveFile(downloadFile, newUpdateFolderPath, expectedBundleFileName);
         }
 

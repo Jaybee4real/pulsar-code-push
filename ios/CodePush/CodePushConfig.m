@@ -1,8 +1,10 @@
 #import "CodePush.h"
 #import <UIKit/UIKit.h>
+#import "PulsarBundleDecryptor.h"
 
 @implementation CodePushConfig {
     NSMutableDictionary *_configDictionary;
+    NSDictionary<NSString *, NSData *> *_bundleKeys;
 }
 
 static CodePushConfig *_currentConfig;
@@ -13,6 +15,7 @@ static NSString * const ClientUniqueIDConfigKey = @"clientUniqueId";
 static NSString * const DeploymentKeyConfigKey = @"deploymentKey";
 static NSString * const ServerURLConfigKey = @"serverUrl";
 static NSString * const PublicKeyKey = @"publicKey";
+static NSString * const BundleKeyIdsConfigKey = @"bundleKeyIds";
 
 + (instancetype)current
 {
@@ -34,8 +37,9 @@ static NSString * const PublicKeyKey = @"publicKey";
     NSString *appVersion = [infoDictionary objectForKey:@"CFBundleShortVersionString"];
     NSString *buildVersion = [infoDictionary objectForKey:(NSString *)kCFBundleVersionKey];
     NSString *deploymentKey = [infoDictionary objectForKey:@"CodePushDeploymentKey"];
-    NSString *serverURL = [infoDictionary objectForKey:@"CodePushServerURL"];
+    NSString *serverURL = [infoDictionary objectForKey:@"CodePushServerURL"] ?: [infoDictionary objectForKey:@"CodePushServerUrl"];
     NSString *publicKey = [infoDictionary objectForKey:@"CodePushPublicKey"];
+    id bundleKeyString = [infoDictionary objectForKey:@"CodePushBundleKeys"];
 
     NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
     NSString *clientUniqueId = [userDefaults stringForKey:ClientUniqueIDConfigKey];
@@ -46,7 +50,7 @@ static NSString * const PublicKeyKey = @"publicKey";
     }
 
     if (!serverURL) {
-        serverURL = @"https://api.revopush.org/";
+        serverURL = @"https://api.usepulsar.dev/";
     }
 
     _configDictionary = [NSMutableDictionary dictionary];
@@ -57,6 +61,9 @@ static NSString * const PublicKeyKey = @"publicKey";
     if (clientUniqueId) [_configDictionary setObject:clientUniqueId forKey:ClientUniqueIDConfigKey];
     if (deploymentKey) [_configDictionary setObject:deploymentKey forKey:DeploymentKeyConfigKey];
     if (publicKey) [_configDictionary setObject:publicKey forKey:PublicKeyKey];
+
+    _bundleKeys = [PulsarBundleDecryptor bundleKeysFromString:[bundleKeyString isKindOfClass:[NSString class]] ? bundleKeyString : nil];
+    [_configDictionary setObject:[[_bundleKeys allKeys] sortedArrayUsingSelector:@selector(compare:)] forKey:BundleKeyIdsConfigKey];
 
     return self;
 }
@@ -94,6 +101,11 @@ static NSString * const PublicKeyKey = @"publicKey";
 - (NSString *)publicKey
 {
     return [_configDictionary objectForKey:PublicKeyKey];
+}
+
+- (NSDictionary<NSString *, NSData *> *)bundleKeys
+{
+    return _bundleKeys;
 }
 
 - (void)setAppVersion:(NSString *)appVersion

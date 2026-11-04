@@ -103,6 +103,7 @@
 @property (copy) NSString *deploymentKey;
 @property (copy) NSString *serverURL;
 @property (copy) NSString *publicKey;
+@property (readonly) NSDictionary<NSString *, NSData *> *bundleKeys;
 
 + (instancetype)current;
 
